@@ -40,6 +40,7 @@ func TestVideoServiceDownload(t *testing.T) {
 	videoService := services.NewVideoService()
 	videoService.Video = video
 	videoService.VideoRepository = repo
+	videoService.StorageService = services.NewGCSStorageService()
 
 	err := videoService.Download("bucket-for-study")
 	require.Nil(t, err)

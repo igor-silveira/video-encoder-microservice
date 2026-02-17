@@ -36,12 +36,21 @@ func NewJobManager(db *gorm.DB, rabbitMQ *queue.RabbitMQ, jobReturnChannel chan 
 }
 
 func (j *JobManager) Start(ch *amqp.Channel) {
+	var storageService StorageService
+	if os.Getenv("STORAGE_TYPE") == "gcs" {
+		storageService = NewGCSStorageService()
+	} else {
+		storageService = NewLocalStorageService()
+	}
+
 	videoService := NewVideoService()
 	videoService.VideoRepository = repositories.VideoRepositoryDb{Db: j.Db}
+	videoService.StorageService = storageService
 
 	jobService := JobService{
-		JobRepository: repositories.JobRepositoryDb{Db: j.Db},
-		VideoService:  videoService,
+		JobRepository:  repositories.JobRepositoryDb{Db: j.Db},
+		VideoService:   videoService,
+		StorageService: storageService,
 	}
 
 	concurrency, err := strconv.Atoi(os.Getenv("CONCURRENCY_WORKERS"))
