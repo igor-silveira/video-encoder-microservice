@@ -1,6 +1,6 @@
 # Video Encoder Microservice
 
-A Go microservice that encodes MP4 videos into **MPEG-DASH** format for adaptive bitrate streaming. It consumes encoding jobs from RabbitMQ, downloads source videos from Google Cloud Storage, processes them using Bento4, and uploads the encoded output back to GCS.
+A Go microservice that encodes MP4 videos into **MPEG-DASH** format for adaptive bitrate streaming. It consumes encoding jobs from RabbitMQ, processes them using Bento4, and supports both **local filesystem** and **Google Cloud Storage** for input/output — so you can run the full pipeline locally without any cloud dependencies.
 
 ## Architecture
 
@@ -11,10 +11,10 @@ A Go microservice that encodes MP4 videos into **MPEG-DASH** format for adaptive
                          └─────┬────────┘
                                │
                                ▼
-┌─────────┐            ┌─────────────────┐           ┌─────────┐
-│   GCS   │──download──│  Video Encoder  │──upload───│   GCS   │
-│ (input) │            │    Workers      │           │ (output)│
-└─────────┘            └────────┬────────┘           └─────────┘
+┌─────────────┐        ┌─────────────────┐       ┌─────────────┐
+│ Local / GCS │──get───│  Video Encoder  │──put──│ Local / GCS │
+│   (input)   │        │    Workers      │       │  (output)   │
+└─────────────┘        └────────┬────────┘       └─────────────┘
                                 │
                      ┌──────────┼──────────┐
                      │          │          │
@@ -29,10 +29,10 @@ Each video goes through the following stages:
 
 `DOWNLOADING` → `FRAGMENTING` → `ENCODING` → `UPLOADING` → `FINISHING` → `COMPLETED`
 
-1. **Download** — Fetch the source MP4 from the GCS input bucket
+1. **Download** — Fetch the source MP4 from local filesystem or GCS
 2. **Fragment** — Run `mp4fragment` to prepare the file for DASH encoding
 3. **Encode** — Run `mp4dash` to generate the MPEG-DASH manifest and segments
-4. **Upload** — Concurrently upload all encoded files to the GCS output bucket
+4. **Upload** — Copy encoded files to the output directory or upload to GCS
 5. **Finish** — Clean up local temporary files
 6. **Notify** — Publish the result (success or error) to the RabbitMQ notification exchange
 
@@ -45,11 +45,13 @@ If any step fails, the job transitions to `FAILED`, the error is recorded, and t
 - **FFmpeg** — Media processing utilities
 - **RabbitMQ** — Async job queue and result notifications
 - **PostgreSQL** — Job and video state persistence
-- **Google Cloud Storage** — Video input/output storage
+- **Local filesystem** (default) or **Google Cloud Storage** — Video input/output storage
 
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
+
+For GCS mode only:
 - A GCP service account with read/write access to Google Cloud Storage
 
 ## Getting Started
@@ -62,15 +64,9 @@ cp .env.example .env
 
 Edit `.env` with your actual values. See [Configuration](#configuration) for details.
 
-### 2. Set up GCP credentials
+By default, the project uses **local filesystem storage** — no cloud credentials needed.
 
-Create a service account in GCP with Cloud Storage read/write permissions. Download the JSON credentials file and place it in the project root:
-
-```bash
-cp /path/to/your-credentials.json ./bucket-credential.json
-```
-
-### 3. Start the services
+### 2. Start the services
 
 ```bash
 docker-compose up -d
@@ -78,7 +74,7 @@ docker-compose up -d
 
 This starts the app container, PostgreSQL, and RabbitMQ.
 
-### 4. Configure RabbitMQ
+### 3. Configure RabbitMQ
 
 Open the RabbitMQ management UI at [http://localhost:15672](http://localhost:15672) (user: `rabbitmq`, pass: `rabbitmq`) and:
 
@@ -86,13 +82,21 @@ Open the RabbitMQ management UI at [http://localhost:15672](http://localhost:156
 2. Create a **queue** and bind it to that exchange (no routing key needed)
 3. Make sure the `RABBITMQ_DLX` value in `.env` matches the exchange name
 
-### 5. Run the encoder
+### 4. Run the encoder
 
 ```bash
 docker exec <container_name> make server
 ```
 
 Find the container name with `docker ps`. By default it will be something like `video-encoder_app_1`.
+
+### Using GCS instead of local storage
+
+Set `STORAGE_TYPE=gcs` in `.env`, configure `INPUT_BUCKET_NAME` and `OUTPUT_BUCKET_NAME`, and place your GCP credentials file in the project root:
+
+```bash
+cp /path/to/your-credentials.json ./bucket-credential.json
+```
 
 ## Configuration
 
@@ -106,8 +110,10 @@ Find the container name with `docker ps`. By default it will be something like `
 | `DEBUG` | Enable debug logging | `true` |
 | `AUTO_MIGRATE_DB` | Auto-migrate database schema on startup | `true` |
 | `LOCAL_STORAGE_PATH` | Temp directory for video processing | `/tmp` |
-| `INPUT_BUCKET_NAME` | GCS bucket for source videos | — |
-| `OUTPUT_BUCKET_NAME` | GCS bucket for encoded output | — |
+| `STORAGE_TYPE` | Storage backend: `local` or `gcs` | `local` |
+| `INPUT_BUCKET_NAME` | GCS bucket for source videos (GCS mode) | — |
+| `INPUT_LOCAL_PATH` | Directory with source videos (local mode) | — |
+| `OUTPUT_BUCKET_NAME` | GCS bucket or local output directory | — |
 | `CONCURRENCY_WORKERS` | Number of parallel job workers | `1` |
 | `CONCURRENCY_UPLOAD` | Number of parallel upload goroutines | `50` |
 | `RABBITMQ_DEFAULT_USER` | RabbitMQ username | `rabbitmq` |
@@ -120,7 +126,7 @@ Find the container name with `docker ps`. By default it will be something like `
 | `RABBITMQ_NOTIFICATION_EX` | Exchange for result notifications | `amq.direct` |
 | `RABBITMQ_NOTIFICATION_ROUTING_KEY` | Routing key for notifications | `jobs` |
 | `RABBITMQ_DLX` | Dead Letter Exchange name | `dlx` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCS service account JSON | — |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCS service account JSON (GCS mode) | — |
 
 ## Message Format
 
@@ -186,7 +192,7 @@ make test
 ├── domain/              # Domain entities (Video, Job)
 ├── application/
 │   ├── repositories/    # Database access layer
-│   └── services/        # Business logic (encoding pipeline, workers, uploads)
+│   └── services/        # Business logic (encoding pipeline, workers, storage)
 ├── framework/
 │   ├── cmd/server/      # Application entrypoint
 │   ├── database/        # Database connection and migrations
